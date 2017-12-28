@@ -1,0 +1,97 @@
+#!/bin/sh
+
+ARG_KEY=''
+
+usage()
+{
+    echo 'Usage:'
+    echo "    $0 -k <package-tracking-serial>"
+}
+
+query_status()
+{
+    local payload=$(printf '{"header":{"InputVOClass":"com.systex.jbranch.app.server.post.vo.EB500100InputVO","TxnCode":"EB500100","BizCode":"query2","StampTime":true,"SupvPwd":"","TXN_DATA":{},"SupvID":"","CustID":"","REQUEST_ID":"","ClientTransaction":true,"DevMode":false,"SectionID":"esoaf"},"body":{"MAILNO":"%s","pageCount":10}}' "${ARG_KEY}")
+
+    local result
+    result=$(curl -L -f -s 'http://postserv.post.gov.tw/pstmail/EsoafDispatcher' \
+        -H 'Content-Type: application/json' \
+        --data-binary "${payload}" \
+        --compressed)
+    local err_code=$?
+
+    if [ $err_code -ne 0 ]; then
+        printf 'Error: query failed, try again later (%d)\n' $err_code
+	exit $err_code
+    fi
+
+    local rbody=$(echo "${result}" | jq '.[0] .body')
+
+    local msg_code=$(echo "${rbody}" | jq -r '.msgCode + ""')
+    if [ -n "${msg_code}" ]; then
+        local msg_data=$(echo "${rbody}" | jq -r '.msgData + ""')
+
+        printf 'Error message: %s\n' "${msg_data}"
+        printf 'Error code: %s\n' "${msg_code}"
+        exit 1
+    fi
+
+    local host_rs=$(echo "${rbody}" | jq '.host_rs')
+    local entry_size=$(echo "${host_rs}" | jq -r '.ITEM | length')
+
+    if [ $entry_size -le 0 ]; then
+        printf 'Error message: No available result\n'
+        exit 1
+    fi
+
+    local last_entry=$(echo "${host_rs}" | jq '.ITEM | reverse | .[0]')
+
+    local opbzone=$(echo "${last_entry}" | jq -r '@text "\(.OPBZOC) (\(.OPBZON | scan("[^ ]+")))"')
+    local weight=$(echo "${last_entry}" | jq -r '.POSWGT | scan("[1-9][0-9]*")')
+    local posfee=$(echo "${last_entry}" | jq -r '.POSFEE | scan("[1-9][0-9]*")')
+
+    local mailno=$(echo "${host_rs}" | jq -r '.MAILNO | scan("[^ ]+")')
+    local mailtype=$(echo "${host_rs}" | jq -r '.MAILTYPE | scan("[^　]+")')
+
+    local summary=$(echo "${host_rs}" | jq -r '.ITEM | reverse | .[] | @text "    \(.DATIME | strptime("%Y%m%d%H%M%S") | strftime("%Y-%m-%d %H:%M:%S")): \(.BRHNC | scan("[^　]+")) - \(.STATUS | scan("[^　]+"))"')
+
+    echo "郵件編號：${mailno}"
+    echo "郵件類型：${mailtype}"
+    echo "寄達局：${opbzone}"
+    echo "重量（公克）：${weight}"
+    echo "郵資：\$${posfee}"
+    echo "郵件狀態："
+    echo "${summary}"
+}
+
+opt_handle()
+{
+    while getopts k:h op
+    do
+        case ${op} in
+            k)
+                ARG_KEY=${OPTARG}
+                ;;
+            *|h)
+                usage
+                exit 0
+                ;;
+            esac
+    done
+}
+
+main()
+{
+    opt_handle $@
+    shift $((${OPTIND} - 1))
+
+    if [ -z "${ARG_KEY}" ]; then
+        usage
+        exit 1
+    fi
+
+    query_status
+
+    exit 0
+}
+
+main $@
